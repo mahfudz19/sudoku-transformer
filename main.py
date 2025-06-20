@@ -4,6 +4,8 @@ import torch.nn.functional as F
 import numpy as np
 import random
 import pandas as pd
+from torch.utils.tensorboard import SummaryWriter
+import os
 
 
 # grid sudoku
@@ -21,6 +23,7 @@ def format_sudoku(s: list):
 
 
 import re
+from tqdm import tqdm
 
 
 def strip_ansi_codes(text):
@@ -86,7 +89,7 @@ class SudokuDataset(torch.utils.data.Dataset):
 
 
 class SudokuTransformer(nn.Module):
-    def __init__(self, vocab_size=10, d_model=128, nhead=8, num_layers=4):
+    def __init__(self, vocab_size=10, d_model=8, nhead=2, num_layers=2):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, d_model)
         self.pos_encoding = nn.Parameter(
@@ -106,6 +109,21 @@ class SudokuTransformer(nn.Module):
         out = self.fc(out)  # (81, batch, 9)
         return out.permute(1, 0, 2)  # (batch, 81, 9)
 
+def is_valid_sudoku_torch(grid):
+    # grid: (9, 9) torch tensor, values 1-9, device can be cuda or cpu
+    # Check rows and columns
+    for i in range(9):
+        if torch.unique(grid[i, :]).numel() != 9:
+            return False
+        if torch.unique(grid[:, i]).numel() != 9:
+            return False
+    # Check 3x3 blocks
+    for i in range(3):
+        for j in range(3):
+            block = grid[i*3:(i+1)*3, j*3:(j+1)*3].reshape(-1)
+            if torch.unique(block).numel() != 9:
+                return False
+    return True
 
 def is_valid_sudoku(pred):
     grid = pred.reshape(9, 9)
@@ -130,40 +148,134 @@ def sudoku_loss(pred, target, criterion, penalty_weight=0.2):
     batch_size = pred_labels.size(0)
     penalty = 0.0
     for i in range(batch_size):
-        if not is_valid_sudoku(pred_labels[i].cpu().numpy()):
+        if not is_valid_sudoku_torch(pred_labels[i].reshape(9, 9)):
             penalty += 1.0
     penalty = penalty_weight * penalty / batch_size
     return ce_loss + penalty
 
 
-def train(train_df: torch.utils.data.Dataset):
+def get_linear_warmup_scheduler(optimizer, warmup_steps, total_steps, min_lr=1e-5):
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        # Linear decay after warmup
+        return max(
+            min_lr / optimizer.defaults['lr'],
+            float(total_steps - current_step) / float(max(1, total_steps - warmup_steps))
+        )
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+def train(train_df: torch.utils.data.Dataset, val_df: torch.utils.data.Dataset = None, patience: int = 10, d_model=8, nhead=2, num_layers=2, batch_size=512, epochs=50, warmup_ratio=0.1):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
-    print("\n\n", device)
-    model = SudokuTransformer().to(device)
+    print("device:", device)
+    model = SudokuTransformer(d_model=d_model, nhead=nhead, num_layers=num_layers).to(device)
     dataset = SudokuDataset(train_df)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    if val_df is not None:
+        val_dataset = SudokuDataset(val_df)
+        val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=32, shuffle=False)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    optimizer = torch.optim.Adam(model.parameters(), lr=3e-3)  # higher lr for big batch
 
-    for epoch in range(50):
+    total_steps = epochs * len(dataloader)
+    warmup_steps = int(warmup_ratio * total_steps)
+    scheduler = get_linear_warmup_scheduler(optimizer, warmup_steps, total_steps)
+
+    best_val_loss = float('inf')
+    epochs_no_improve = 0
+    best_model_state = None
+
+    writer = SummaryWriter()
+    os.makedirs('checkpoints', exist_ok=True)
+    # Save optimizer and scheduler state_dicts in checkpoint
+    checkpoint_prefix = f"best_checkpoint_{d_model}_{nhead}_{num_layers}"
+    best_model_path = f'checkpoints/{checkpoint_prefix}.pt'
+    best_model_epoch_path = f'checkpoints/{checkpoint_prefix}.txt'
+    start_epoch = 0
+    global_step = 0
+
+    # Resume if best model exists
+    if os.path.exists(best_model_path):
+        print(f"Resuming from {best_model_path}")
+        checkpoint = torch.load(best_model_path, map_location=device)
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            start_epoch = checkpoint.get('epoch', 0) + 1
+            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+            print(f"Resuming from epoch {start_epoch}")
+        else:
+            # Fallback for old checkpoints (model only)
+            model.load_state_dict(checkpoint)
+            if os.path.exists(best_model_epoch_path):
+                with open(best_model_epoch_path, 'r') as f:
+                    start_epoch = int(f.read().strip()) + 1
+                print(f"Resuming from epoch {start_epoch}")
+            else:
+                print("No epoch info found, resuming from epoch 0")
+
+    for epoch in range(start_epoch, epochs):
         total_loss = 0
-        for x, y in dataloader:
-            x, y = x.to(device), y.to(device) - 1  # make target in range 0–8
+        model.train()
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}")
+        for x, y in pbar:
+            x, y = x.to(device), y.to(device) - 1
             out = model(x)
-
             loss = sudoku_loss(out, y, criterion)
-
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            scheduler.step()
+            global_step += 1
             total_loss += loss.item()
-        print(f"Epoch {epoch+1} | Loss: {total_loss / len(dataloader):.4f}")
+            pbar.set_description(f"Epoch {epoch+1}/{epochs} | lr={scheduler.get_last_lr()[0]:.6f} | loss={loss.item():.4f}")
+        avg_train_loss = total_loss / len(dataloader)
+        writer.add_scalar('Loss/train', avg_train_loss, epoch)
+        print(f"Epoch {epoch+1} | Train Loss: {avg_train_loss:.4f}", end="")
 
+        # Validation
+        if val_df is not None:
+            model.eval()
+            val_loss = 0
+            with torch.no_grad():
+                for x, y in val_dataloader:
+                    x, y = x.to(device), y.to(device) - 1
+                    out = model(x)
+                    loss = sudoku_loss(out, y, criterion)
+                    val_loss += loss.item()
+            avg_val_loss = val_loss / len(val_dataloader)
+            writer.add_scalar('Loss/val', avg_val_loss, epoch)
+            print(f" | Val Loss: {avg_val_loss:.4f}")
+
+            # Save only the best model (overwrite if improved)
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                epochs_no_improve = 0
+                best_model_state = model.state_dict()
+                # Save model, optimizer, scheduler, epoch, and best_val_loss
+                torch.save({
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'epoch': epoch,
+                    'best_val_loss': best_val_loss
+                }, best_model_path)
+                with open(best_model_epoch_path, 'w') as f:
+                    f.write(str(epoch))
+            else:
+                epochs_no_improve += 1
+                if epochs_no_improve >= patience:
+                    print(f"Early stopping at epoch {epoch+1}")
+                    if best_model_state is not None:
+                        model.load_state_dict(best_model_state)
+                    break
+        else:
+            print()
+
+    writer.close()
     return model
 
 
@@ -231,17 +343,33 @@ def predict(model, puzzle):
 
 if __name__ == "__main__":
     # Load data
-    df = pd.read_csv("sudoku.csv")
+    df = pd.read_csv("/workspace/sudoku-transformer/sudoku.csv")
     df = df.dropna().reset_index(drop=True)  # bersihkan data dari baris yang kosong
     print(f"Loaded {len(df)} sudoku samples.")
 
     df.columns = df.columns.str.strip()
 
     # Use a small subset to train fast
-    train_df = df[:50000]
-    test_df = df[50000 : 50000 + 10]
+    train_idx = int(len(df) * 0.8)
+    val_idx = int(len(df) * 0.9)
+    train_df = df[:train_idx]
+    val_df = df[train_idx:val_idx]
+    test_df = df[val_idx:]
 
-    model = train(train_df)
+    # Set your desired architecture here
+    d_model = 128
+    nhead = 8
+    num_layers = 4
+    batch_size = 1800  # <--- batch size here
+    epoch = 1000
+    model = train(
+        train_df, val_df, 
+        d_model=d_model, 
+        nhead=nhead, 
+        num_layers=num_layers, 
+        batch_size=batch_size,
+        epochs=epoch,
+    )
 
     # === Inference ===
     print("\n=== Inference ===")

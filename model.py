@@ -16,3 +16,15 @@ class SudokuTransformer(nn.Module):
         out = self.transformer(emb)
         out = self.fc(out)
         return out.permute(1, 0, 2)
+
+if __name__ == "__main__":
+    from torch.utils.tensorboard import SummaryWriter
+    from torchinfo import summary
+    device = torch.device("cpu")  # Use CPU for visualization
+    model = SudokuTransformer().to(device)
+    dummy_input = torch.randint(0, 10, (1, 81), dtype=torch.long, device=device)
+    print("\n===== torchinfo.summary() =====\n")
+    summary(model, input_size=(1, 81), dtypes=[torch.long], col_names=["input_size", "output_size", "num_params", "params_percent"], depth=4, device=device)
+    writer = SummaryWriter("runs/model_graph")
+    writer.add_graph(model, dummy_input)
+    writer.close()

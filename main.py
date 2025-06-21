@@ -1,110 +1,38 @@
+from model import SudokuTransformer
+from dataset import SudokuDataset, ensure_sudoku_csv
+from utils import format_sudoku, strip_ansi_codes, print_side_by_side, load_checkpoint
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import random
 import pandas as pd
-
-
-# grid sudoku
-def format_sudoku(s: list):
-    rows = []
-    for i in range(9):
-        row = s[i * 9 : (i + 1) * 9]
-        # Convert all elements to string for joining
-        row = ["." if ch == 0 else str(ch) for ch in row]
-        formatted_row = " | ".join(" ".join(row[j : j + 3]) for j in range(0, 9, 3))
-        rows.append(formatted_row)
-        if i % 3 == 2 and i != 8:
-            rows.append("-" * 21)
-    return rows
-
-
-import re
-
-
-def strip_ansi_codes(text):
-    ansi_escape = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
-    return ansi_escape.sub("", text)
-
-
-def print_side_by_side(puzzle, predicted, ground_truth):
-    puzzle_lines = format_sudoku(puzzle)
-    truth_lines = format_sudoku(ground_truth)
-
-    # Prepare predicted lines with color for wrong digits
-    predicted_lines = []
-    for i in range(9):
-        row_pred = predicted[i * 9 : (i + 1) * 9]
-        row_truth = ground_truth[i * 9 : (i + 1) * 9]
-        row_str = ""
-        for j in range(9):
-            ch = str(row_pred[j])
-            if row_pred[j] != row_truth[j]:
-                # ANSI escape code for red color
-                ch = f"\033[91m{ch}\033[0m"
-            row_str += ch + " "
-            if (j + 1) % 3 == 0 and j != 8:
-                row_str += "| "
-        predicted_lines.append(row_str)
-        if (i + 1) % 3 == 0 and i != 8:
-            predicted_lines.append("-" * 21)
-
-    # Pad predicted lines based on visible length (excluding ANSI codes)
-    padded_predicted_lines = []
-    for line in predicted_lines:
-        visible_len = len(strip_ansi_codes(line))
-        padding = 25 - visible_len
-        if padding > 0:
-            line += " " * padding
-        padded_predicted_lines.append(line)
-
-    print(f"\n{'Puzzle':<25} {'Predicted':<25} {'Ground Truth':<25}")
-    print("=" * 75)
-    for p, pr, gt in zip(puzzle_lines, padded_predicted_lines, truth_lines):
-        print(f"{p:<25} {pr} {gt:<25}")
+from torch.utils.tensorboard import SummaryWriter
+import os
+from tqdm import tqdm
+import argparse
 
 
 # Set seed
 torch.manual_seed(42)
 
 
-# Dataset
-class SudokuDataset(torch.utils.data.Dataset):
-    def __init__(self, df):
-        self.df = df
-
-    def __len__(self):
-        return len(self.df)
-
-    def __getitem__(self, idx):
-        quizzes, solutions = self.df.iloc[idx]
-        x = torch.tensor([int(ch) for ch in quizzes], dtype=torch.long)
-        y = torch.tensor([int(ch) for ch in solutions], dtype=torch.long)
-
-        return x, y
-
-
-class SudokuTransformer(nn.Module):
-    def __init__(self, vocab_size=10, d_model=128, nhead=8, num_layers=4):
-        super().__init__()
-        self.embedding = nn.Embedding(vocab_size, d_model)
-        self.pos_encoding = nn.Parameter(
-            torch.rand(81, d_model)
-        )  # positional encoding for 81 tokens
-
-        encoder_layer = nn.TransformerEncoderLayer(d_model, nhead)
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers)
-
-        self.fc = nn.Linear(d_model, 9)  # output is digit 1-9
-
-    def forward(self, x):
-        # x shape: (batch, 81)
-        emb = self.embedding(x) + self.pos_encoding  # (batch, 81, d_model)
-        emb = emb.permute(1, 0, 2)  # (81, batch, d_model)
-        out = self.transformer(emb)  # (81, batch, d_model)
-        out = self.fc(out)  # (81, batch, 9)
-        return out.permute(1, 0, 2)  # (batch, 81, 9)
+def is_valid_sudoku_torch(grid):
+    # grid: (9, 9) torch tensor, values 1-9, device can be cuda or cpu
+    # Check rows and columns
+    for i in range(9):
+        if torch.unique(grid[i, :]).numel() != 9:
+            return False
+        if torch.unique(grid[:, i]).numel() != 9:
+            return False
+    # Check 3x3 blocks
+    for i in range(3):
+        for j in range(3):
+            block = grid[i*3:(i+1)*3, j*3:(j+1)*3].reshape(-1)
+            if torch.unique(block).numel() != 9:
+                return False
+    return True
 
 
 def is_valid_sudoku(pred):
@@ -130,40 +58,104 @@ def sudoku_loss(pred, target, criterion, penalty_weight=0.2):
     batch_size = pred_labels.size(0)
     penalty = 0.0
     for i in range(batch_size):
-        if not is_valid_sudoku(pred_labels[i].cpu().numpy()):
+        if not is_valid_sudoku_torch(pred_labels[i].reshape(9, 9)):
             penalty += 1.0
     penalty = penalty_weight * penalty / batch_size
     return ce_loss + penalty
 
 
-def train(train_df: torch.utils.data.Dataset):
+def get_linear_warmup_scheduler(optimizer, warmup_steps, total_steps, min_lr=1e-5):
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        # Linear decay after warmup
+        return max(
+            min_lr / optimizer.defaults['lr'],
+            float(total_steps - current_step) / float(max(1, total_steps - warmup_steps))
+        )
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def train(model: torch.nn.Module, optimizer: torch.optim.Optimizer, scheduler, train_df: pd.DataFrame, val_df: pd.DataFrame = None, patience: int = 10, batch_size: int = 512, epochs: int = 50, start_epoch: int = 0, best_val_loss: float = float('inf')) -> torch.nn.Module:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    if torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
-    print("\n\n", device)
-    model = SudokuTransformer().to(device)
+    print("device:", device)
     dataset = SudokuDataset(train_df)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=32, shuffle=True)
+    dataloader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    if val_df is not None:
+        val_dataset = SudokuDataset(val_df)
+        val_dataloader = torch.utils.data.DataLoader(val_dataset, batch_size=32, shuffle=False)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
+    writer = SummaryWriter()
+    epochs_no_improve = 0
+    best_model_state = None
+    global_step = 0
 
-    for epoch in range(50):
+    os.makedirs('checkpoints', exist_ok=True)  # Ensure checkpoints directory exists
+
+    for epoch in range(start_epoch, epochs):
         total_loss = 0
-        for x, y in dataloader:
-            x, y = x.to(device), y.to(device) - 1  # make target in range 0–8
+        model.train()
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{epochs}")
+        for x, y in pbar:
+            x, y = x.to(device), y.to(device) - 1
             out = model(x)
-
             loss = sudoku_loss(out, y, criterion)
-
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            scheduler.step()
+            global_step += 1
             total_loss += loss.item()
-        print(f"Epoch {epoch+1} | Loss: {total_loss / len(dataloader):.4f}")
+            pbar.set_description(f"Epoch {epoch+1}/{epochs} | lr={scheduler.get_last_lr()[0]:.6f} | loss={loss.item():.4f}")
+        avg_train_loss = total_loss / len(dataloader)
+        writer.add_scalar('Loss/train', avg_train_loss, epoch)
+        print(f"Epoch {epoch+1} | Train Loss: {avg_train_loss:.4f}", end="")
 
+        # Validation
+        if val_df is not None:
+            model.eval()
+            val_loss = 0
+            with torch.no_grad():
+                for x, y in val_dataloader:
+                    x, y = x.to(device), y.to(device) - 1
+                    out = model(x)
+                    loss = sudoku_loss(out, y, criterion)
+                    val_loss += loss.item()
+            avg_val_loss = val_loss / len(val_dataloader)
+            writer.add_scalar('Loss/val', avg_val_loss, epoch)
+            print(f" | Val Loss: {avg_val_loss:.4f}")
+
+            # Save only the best model (overwrite if improved)
+            if avg_val_loss < best_val_loss:
+                best_val_loss = avg_val_loss
+                epochs_no_improve = 0
+                best_model_state = model.state_dict()
+                # Save model, optimizer, scheduler, epoch, and best_val_loss
+                checkpoint_prefix = f"best_checkpoint_{model.embedding.embedding_dim}_{model.transformer.layers[0].self_attn.num_heads}_{len(model.transformer.layers)}"
+                best_model_path = f'checkpoints/{checkpoint_prefix}.pt'
+                best_model_epoch_path = f'checkpoints/{checkpoint_prefix}.txt'
+                torch.save({
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'epoch': epoch,
+                    'best_val_loss': best_val_loss
+                }, best_model_path)
+                with open(best_model_epoch_path, 'w') as f:
+                    f.write(str(epoch))
+            else:
+                epochs_no_improve += 1
+                if epochs_no_improve >= patience:
+                    print(f"Early stopping at epoch {epoch+1}")
+                    if best_model_state is not None:
+                        model.load_state_dict(best_model_state)
+                    break
+        else:
+            print()
+
+    writer.close()
     return model
 
 
@@ -230,27 +222,76 @@ def predict(model, puzzle):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--training', type=lambda x: (str(x).lower() == 'true'), default=True, help='Set False to skip training and only run test')
+    args = parser.parse_args()
+
+    # Ensure dataset is present or download it
+    ensure_sudoku_csv("/workspace/sudoku-transformer/sudoku.csv")
+
     # Load data
-    df = pd.read_csv("sudoku.csv")
-    df = df.dropna().reset_index(drop=True)  # bersihkan data dari baris yang kosong
+    df = pd.read_csv("/workspace/sudoku-transformer/sudoku.csv")
+    df = df.dropna().reset_index(drop=True)
     print(f"Loaded {len(df)} sudoku samples.")
-
     df.columns = df.columns.str.strip()
+    train_idx = int(len(df) * 0.8)
+    val_idx = int(len(df) * 0.9)
+    train_df = df[:train_idx]
+    val_df = df[train_idx:val_idx]
+    test_df = df[val_idx:]
 
-    # Use a small subset to train fast
-    train_df = df[:50000]
-    test_df = df[50000 : 50000 + 10]
+    d_model = 128
+    nhead = 8
+    num_layers = 4
+    batch_size = 1800
+    epoch = 1000
 
-    model = train(train_df)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = SudokuTransformer(d_model=d_model, nhead=nhead, num_layers=num_layers).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=3e-3)
+    total_steps = epoch * (len(train_df) // batch_size + 1)
+    warmup_steps = int(0.1 * total_steps)
+    scheduler = get_linear_warmup_scheduler(optimizer, warmup_steps, total_steps)
 
-    # === Inference ===
+    checkpoint_prefix = f"best_checkpoint_{d_model}_{nhead}_{num_layers}"
+    best_model_path = f'checkpoints/{checkpoint_prefix}.pt'
+    best_model_epoch_path = f'checkpoints/{checkpoint_prefix}.txt'
+    start_epoch, best_val_loss = load_checkpoint(model, optimizer, scheduler, best_model_path, best_model_epoch_path, device)
+
+    if args.training:
+        model = train(
+            model, optimizer, scheduler,
+            train_df, val_df,
+            batch_size=batch_size,
+            epochs=epoch,
+            start_epoch=start_epoch,
+            best_val_loss=best_val_loss
+        )
+
+    # === Inference & Evaluation ===
     print("\n=== Inference ===")
     model.eval()
-
+    correct_exact = 0
+    correct_valid = 0
+    total = 0
+    pbar = tqdm(enumerate(test_df.iterrows()), total=len(test_df), desc="Testing")
+    
     with torch.no_grad():
-        for i in range(len(test_df)):
-            test_sample = test_df.iloc[i]
+        for i, (_, test_sample) in pbar:
             input_puzzle = [int(ch) for ch in test_sample["quizzes"]]
             solution = [int(ch) for ch in test_sample["solutions"]]
             pred = predict(model, input_puzzle)
-            print_side_by_side(input_puzzle, pred.tolist(), solution)
+            # 1. Exact match
+            if pred.tolist() == solution:
+                correct_exact += 1
+            # 2. Valid sudoku
+            if is_valid_sudoku_torch(torch.tensor(pred.reshape(9, 9))):
+                correct_valid += 1
+            total += 1
+            pbar.set_postfix({
+                "Exact Match": f"{correct_exact}/{total} ({correct_exact/total:.4f})",
+                "Valid Sudoku": f"{correct_valid}/{total} ({correct_valid/total:.4f})"
+            })
+
+    print(f"Test Accuracy (Exact match): {correct_exact}/{total} = {correct_exact/total:.4f}")
+    print(f"Test Accuracy (Valid Sudoku): {correct_valid}/{total} = {correct_valid/total:.4f}")

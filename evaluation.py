@@ -238,7 +238,7 @@ def plot_predictions(evaluation_results: Dict, save_plot: bool = True):
     plt.tight_layout()
 
     if save_plot:
-        plot_path = "prediction_analysis.png"
+        plot_path = "plt/prediction_analysis.png"
         plt.savefig(plot_path, dpi=300, bbox_inches="tight")
         print(f"💾 Prediction plots saved to: {plot_path}")
 
@@ -471,7 +471,7 @@ def plot_future_predictions(
     plt.tight_layout()
 
     if save_plot:
-        plot_path = "future_predictions.png"
+        plot_path = "plt/future_predictions.png"
         plt.savefig(plot_path, dpi=300, bbox_inches="tight")
         print(f"💾 Future prediction plot saved to: {plot_path}")
 

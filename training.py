@@ -247,7 +247,7 @@ def plot_training_history(history: Dict, save_plot: bool = True):
     plt.tight_layout()
 
     if save_plot:
-        plot_path = "training_history.png"
+        plot_path = "plt/training_history.png"
         plt.savefig(plot_path, dpi=300, bbox_inches="tight")
         print(f"💾 Plot saved to: {plot_path}")
 

@@ -3,6 +3,7 @@
 # Step 3: Create Sequences (Windowing)
 # Step 4: Split Data
 # Step 5: Model dan DataLoader (terpisah)
+import os
 import requests
 import pandas as pd
 import numpy as np
@@ -17,6 +18,20 @@ from data_loader import create_dataloaders
 from model import create_model
 from training import train_model, plot_training_history, load_best_model
 from evaluation import comprehensive_evaluation
+
+
+def create_output_directories():
+    """Create necessary directories for saving outputs"""
+    directories = ["file", "plt"]
+
+    for directory in directories:
+        try:
+            os.makedirs(directory, exist_ok=True)
+            print(f"📁 ✅ Created/verified directory: {directory}/")
+        except PermissionError:
+            print(f"❌ Permission denied creating: {directory}/")
+        except Exception as e:
+            print(f"❌ Error creating {directory}/: {e}")
 
 
 def fetch_stock_data(symbol="TSLA", api_key="6DAM6N6ZSRQZNFR1"):
@@ -236,6 +251,10 @@ def split_data(x: NDArray, y: NDArray, train_ratio=0.7, val_ratio=0.15):
 
 # Test fungsi yang sudah dibuat
 if __name__ == "__main__":
+    # Setup output directories first
+    print("🗂️  Setting up output directories...")
+    create_output_directories()
+
     # Step 1: Ambil data saham
     df = fetch_stock_data("AAPL")
 
@@ -272,7 +291,7 @@ if __name__ == "__main__":
                 "num_epochs": 50,
                 "learning_rate": 0.001,
                 "patience": 10,
-                "save_path": "best_stock_model.pth",
+                "save_path": "file/best_stock_model.pth",
             }
 
             # Start training

@@ -1,195 +1,136 @@
-# Autoregressive Transformer Model untuk Stock Prediction
-# Pure model definition tanpa data handling
-
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import math
 
+from torch.utils.data import Dataset, DataLoader
+from numpy.typing import NDArray
 
 class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=5000):
+    """Positional encoding untuk Transformer"""
+    
+    def __init__(self, d_model, max_len=5000):
         super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
-
-        # Buat matrix positional encoding
+        
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-        )
-
-        # Gunakan sin untuk even indices, cos untuk odd indices
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * 
+                           (-math.log(10000.0) / d_model))
+        
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
         pe = pe.unsqueeze(0).transpose(0, 1)
-
-        # Register sebagai buffer (tidak akan di-update saat training)
-        self.register_buffer("pe", pe)
-
+        
+        self.register_buffer('pe', pe)
+        
     def forward(self, x):
-        """
-        x: Tensor shape (batch_size, seq_len, d_model)
-        """
-        x = x + self.pe[: x.size(1), :].transpose(0, 1)
-        return self.dropout(x)
+        return x + self.pe[:x.size(0), :]
 
 
-class AutoregressiveTransformer(nn.Module):
-    def __init__(
-        self,
-        input_size=1,
-        d_model=64,
-        nhead=8,
-        num_layers=3,
-        dim_feedforward=256,
-        dropout=0.1,
-    ):
-        super(AutoregressiveTransformer, self).__init__()
-
+class TransformerStockPredictor(nn.Module):
+    """
+    Transformer-based model untuk prediksi saham
+    
+    📈 State-of-the-art architecture:
+    - Self-attention mechanism
+    - Parallel processing
+    - Dapat capture complex patterns
+    """
+    
+    def __init__(self, d_model=64, nhead=8, num_layers=2, seq_len=5, dropout=0.1):
+        super(TransformerStockPredictor, self).__init__()
+        
         self.d_model = d_model
-
-        # 1. Input projection: 1 nilai price → d_model dimensi
-        # Seperti mengubah satu angka jadi vector dengan banyak "features"
-        self.input_projection = nn.Linear(input_size, d_model)
-
-        # 2. Positional encoding untuk urutan
-        self.positional_encoding = PositionalEncoding(d_model, dropout)
-
-        # 3. Transformer Decoder layers
-        # Ini adalah "otak" dari model - bisa "memperhatikan" data penting
-        decoder_layer = nn.TransformerDecoderLayer(
+        self.seq_len = seq_len
+        
+        # Input projection
+        self.input_projection = nn.Linear(1, d_model)
+        
+        # Positional encoding
+        self.pos_encoder = PositionalEncoding(d_model)
+        
+        # Transformer encoder
+        encoder_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
             nhead=nhead,
-            dim_feedforward=dim_feedforward,
+            dim_feedforward=d_model * 4,
             dropout=dropout,
-            batch_first=True,  # Input shape: (batch, seq, feature)
+            activation='relu',
+            batch_first=True
         )
-        self.transformer_decoder = nn.TransformerDecoder(
-            decoder_layer, num_layers=num_layers
-        )
-
-        # 4. Output projection: d_model → 1 prediction
-        # Convert kembali dari vector ke satu nilai prediksi
-        self.output_projection = nn.Linear(d_model, 1)
-
-    def generate_square_subsequent_mask(self, sz):
-        """
-        Generate causal mask untuk autoregressive behavior
-
-        🚫 Untuk JavaScript developer:
-        Seperti "blindfold" - model tidak boleh "melihat" data masa depan:
-
-        const mask = [
-            [0, -∞, -∞, -∞, -∞],  // day1 hanya lihat day1
-            [0,  0, -∞, -∞, -∞],  // day2 lihat day1-2
-            [0,  0,  0, -∞, -∞],  // day3 lihat day1-3
-            [0,  0,  0,  0, -∞],  // day4 lihat day1-4
-            [0,  0,  0,  0,  0]   // day5 lihat day1-5
-        ];
-        """
-        mask = torch.triu(torch.ones(sz, sz) * float("-inf"), diagonal=1)
-        return mask
-
-    def forward(self, src):
-        """
-        Forward pass - jalankan prediksi
-
-        Parameters:
-        - src: Input tensor shape (batch_size, seq_len, 1)
-               Contoh: batch 16 sequences, masing-masing 5 hari, 1 price value
-
-        Returns:
-        - output: Predicted next value shape (batch_size, 1)
-        """
-        batch_size, seq_len, _ = src.shape
-
-        # 1. Project input dari 1 dimensi ke d_model dimensi
-        # [170.5] → [0.2, -0.5, 0.8, ..., 0.1] (64 nilai)
-        src = self.input_projection(src)
-
-        # 2. Add positional encoding
-        # Kasih tahu model urutan: day1, day2, day3, day4, day5
-        src = self.positional_encoding(src)
-
-        # 3. Create causal mask (autoregressive)
-        # Model tidak boleh "nyontek" dari masa depan
-        tgt_mask = self.generate_square_subsequent_mask(seq_len).to(src.device)
-
-        # 4. Transformer processing
-        # Ini bagian "magic" - attention mechanism bekerja
-        output = self.transformer_decoder(
-            tgt=src,  # Target sequence
-            memory=src,  # Memory (sama dengan target untuk self-attention)
-            tgt_mask=tgt_mask,  # Causal mask
-        )
-
-        # 5. Project ke output dan ambil timestep terakhir
-        # Ambil hasil dari day5 (timestep terakhir) untuk prediksi day6
-        output = self.output_projection(output[:, -1, :])  # Shape: (batch_size, 1)
-
-        return output
+        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        
+        # Output layers
+        self.fc1 = nn.Linear(d_model, d_model // 2)
+        self.fc2 = nn.Linear(d_model // 2, 1)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, x):
+        # x shape: (batch_size, sequence_length)
+        batch_size, seq_len = x.shape
+        
+        # Add feature dimension and project to d_model
+        x = x.unsqueeze(-1)  # (batch_size, seq_len, 1)
+        x = self.input_projection(x)  # (batch_size, seq_len, d_model)
+        
+        # Scale by sqrt(d_model) as in original transformer
+        x = x * math.sqrt(self.d_model)
+        
+        # Add positional encoding
+        x = x.transpose(0, 1)  # (seq_len, batch_size, d_model)
+        x = self.pos_encoder(x)
+        x = x.transpose(0, 1)  # (batch_size, seq_len, d_model)
+        
+        # Transformer encoding
+        transformer_out = self.transformer(x)  # (batch_size, seq_len, d_model)
+        
+        # Global average pooling atau ambil last token
+        # Disini kita ambil last token untuk prediction
+        last_output = transformer_out[:, -1, :]  # (batch_size, d_model)
+        
+        # Final prediction layers
+        x = self.dropout(last_output)
+        x = F.relu(self.fc1(x))
+        x = self.dropout(x)
+        output = self.fc2(x)
+        
+        return output.squeeze(-1)
 
 
-def create_model(model_config=None, device="cpu"):
-    print(f"\n🧠STEP 5b: CREATING AUTOREGRESSIVE TRANSFORMER")
-    print("=" * 50)
 
-    # Default config jika tidak ada
-    if model_config is None:
-        model_config = {
-            "input_size": 1,
-            "d_model": 64,
-            "nhead": 8,
-            "num_layers": 3,
-            "dim_feedforward": 256,
-            "dropout": 0.1,
-        }
+class StockDataset(Dataset):
+    def __init__(self, sequences, targets):
+        self.sequences = torch.FloatTensor(sequences)
+        self.targets = torch.FloatTensor(targets)
 
-    # Create model
-    model = AutoregressiveTransformer(**model_config)
-    model = model.to(device)
+    def __len__(self):
+        return len(self.sequences)
 
-    print(f"\n✅ Model ready for training!")
-
-    return model
+    def __getitem__(self, idx):
+        return self.sequences[idx], self.targets[idx]
 
 
-# Test function
-def test_model_creation():
-    print("🧪 Testing model creation...")
+def create_dataloaders(
+    train_data: tuple[NDArray, NDArray],
+    val_data: tuple[NDArray, NDArray],
+    test_data: tuple[NDArray, NDArray],
+    batch_size=16,
+):
+    # Create datasets
+    train_dataset = StockDataset(train_data[0], train_data[1])
+    val_dataset = StockDataset(val_data[0], val_data[1])
+    test_dataset = StockDataset(test_data[0], test_data[1])
 
-    try:
-        # Test dengan config default
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = create_model(device=device)
+    # Create data loaders (untuk batch processing)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=0)
 
-        # Test forward pass dengan dummy data
-        batch_size = 4
-        seq_len = 5
-        input_size = 1
-
-        # Create dummy input
-        dummy_input = torch.randn(batch_size, seq_len, input_size).to(device)
-
-        # Forward pass
-        with torch.no_grad():
-            output = model(dummy_input)
-
-        print(f"✅ Forward pass successful!")
-        print(f"   Input shape: {dummy_input.shape}")
-        print(f"   Output shape: {output.shape}")
-        print(
-            f"   Output range: {output.min().item():.4f} to {output.max().item():.4f}"
-        )
-
-        print(f"✅ Model test passed!")
-        return True
-
-    except Exception as e:
-        print(f"❌ Model test failed: {e}")
-        return False
-
-
-if __name__ == "__main__":
-    # Test model creation
-    test_model_creation()
+    return {
+        "train_loader": train_loader,
+        "val_loader": val_loader,
+        "test_loader": test_loader,
+        "train_dataset": train_dataset,
+        "val_dataset": val_dataset,
+        "test_dataset": test_dataset,
+    }

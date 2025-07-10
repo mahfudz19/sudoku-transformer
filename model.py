@@ -7,8 +7,6 @@ from torch.utils.data import Dataset, DataLoader
 from numpy.typing import NDArray
 
 class PositionalEncoding(nn.Module):
-    """Positional encoding untuk Transformer"""
-    
     def __init__(self, d_model, max_len=5000):
         super(PositionalEncoding, self).__init__()
         
@@ -28,15 +26,6 @@ class PositionalEncoding(nn.Module):
 
 
 class TransformerStockPredictor(nn.Module):
-    """
-    Transformer-based model untuk prediksi saham
-    
-    📈 State-of-the-art architecture:
-    - Self-attention mechanism
-    - Parallel processing
-    - Dapat capture complex patterns
-    """
-    
     def __init__(self, d_model=64, nhead=8, num_layers=2, seq_len=5, dropout=0.1):
         super(TransformerStockPredictor, self).__init__()
         
@@ -47,23 +36,30 @@ class TransformerStockPredictor(nn.Module):
         self.input_projection = nn.Linear(1, d_model)
         
         # Positional encoding
-        self.pos_encoder = PositionalEncoding(d_model)
+        self.pos_decoder = PositionalEncoding(d_model)
         
-        # Transformer encoder
-        encoder_layer = nn.TransformerEncoderLayer(
+        # Transformer decoder
+        decoder_layer = nn.TransformerDecoderLayer(
             d_model=d_model,
             nhead=nhead,
             dim_feedforward=d_model * 4,
             dropout=dropout,
-            activation='relu',
+            activation='gelu',
             batch_first=True
         )
-        self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-        
+        self.transformer = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+        self.register_buffer("causal_mask", self._generate_causal_mask(seq_len))
+
         # Output layers
         self.fc1 = nn.Linear(d_model, d_model // 2)
         self.fc2 = nn.Linear(d_model // 2, 1)
         self.dropout = nn.Dropout(dropout)
+
+    def _generate_causal_mask(self, seq_len):
+        # Membuat mask segitiga atas untuk decoder-only (causal)
+        mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1)
+        mask = mask.masked_fill(mask == 1, float('-inf'))
+        return mask
         
     def forward(self, x):
         # x shape: (batch_size, sequence_length)
@@ -78,11 +74,15 @@ class TransformerStockPredictor(nn.Module):
         
         # Add positional encoding
         x = x.transpose(0, 1)  # (seq_len, batch_size, d_model)
-        x = self.pos_encoder(x)
+        x = self.pos_decoder(x)
         x = x.transpose(0, 1)  # (batch_size, seq_len, d_model)
         
         # Transformer encoding
-        transformer_out = self.transformer(x)  # (batch_size, seq_len, d_model)
+        transformer_out = self.transformer(
+            tgt=x, 
+            memory=x, 
+            tgt_mask=self.causal_mask[:seq_len, :seq_len]
+        )
         
         # Global average pooling atau ambil last token
         # Disini kita ambil last token untuk prediction
@@ -95,7 +95,6 @@ class TransformerStockPredictor(nn.Module):
         output = self.fc2(x)
         
         return output.squeeze(-1)
-
 
 
 class StockDataset(Dataset):

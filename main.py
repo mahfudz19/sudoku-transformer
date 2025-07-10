@@ -44,7 +44,7 @@ if __name__ == "__main__":
         model=model,
         train_loader=dataloader_components['train_loader'],
         val_loader=dataloader_components['val_loader'],
-        num_epochs=50,
+        num_epochs=250,
         lr=0.001
     )
     

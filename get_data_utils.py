@@ -130,30 +130,50 @@ def normalize_data(df: pd.DataFrame, target_column="close"):
     return scaler, normalized_data
 
 
-def create_sequences(normalized_data: NDArray[np.float64], window_size=5):
+def create_sequences_old(normalized_data: NDArray[np.float64], window_size=5): # Standard sliding
     # Validasi input
     if len(normalized_data) <= window_size:
         print(f"❌ Error: Data terlalu sedikit. Need > {window_size}, got {len(normalized_data)}")
         return None, None
 
-    X = []  # Input sequences
-    y = []  # Target values
+    x = []
+    y = []
+    for i in range(len(normalized_data) - window_size):
+        seq = normalized_data[i:i+window_size]
+        x.append(seq[:-1])  # input: [x1, x2, x3, x4]
+        y.append(seq[1:])   # target: [x2, x3, x4, x5]
+    return np.array(x), np.array(y)
 
-    # Buat sequences dengan sliding window
-    for i in range(window_size, len(normalized_data)):
-        # Ambil window_size hari sebelumnya sebagai input
-        sequence = normalized_data[i - window_size : i, 0]  # Shape: (window_size,)
-        target = normalized_data[i, 0]  # Hari ke-i sebagai target
+def create_sequences(normalized_data: NDArray[np.float64], window_size=5): # Progressive sequence
+    # Validasi input
+    if len(normalized_data) <= window_size:
+        print(f"❌ Error: Data terlalu sedikit. Need > {window_size}, got {len(normalized_data)}")
+        return None, None
 
-        X.append(sequence)
-        y.append(target)
-
-    # Convert ke numpy arrays
-    x = np.array(X)  # Shape: (num_sequences, window_size)
-    y = np.array(y)  # Shape: (num_sequences,)
-
-    return x, y
-
+    x = []
+    y = []
+    
+    for i in range(len(normalized_data) - window_size):
+        # Input selalu sama: window_size-1 elemen
+        input_seq = normalized_data[i:i+window_size-1]  # [x1, x2, x3, x4]
+        x.append(input_seq)
+        
+        # Target dengan panjang yang bertambah
+        # Sequence ke-i: mulai dari index 1, panjang = window_size-1 + i
+        target_length = (window_size - 1) + i
+        target_start = 1  # Selalu mulai dari index 1
+        target_end = target_start + target_length
+        
+        # Pastikan tidak melebihi batas data
+        if target_end <= len(normalized_data):
+            target_seq = normalized_data[target_start:target_end]
+            y.append(target_seq)
+        else:
+            # Jika melebihi batas, ambil sampai akhir data
+            target_seq = normalized_data[target_start:]
+            y.append(target_seq)
+    
+    return x, y  # Return as lists karena y memiliki panjang yang berbeda-beda
 
 def split_data(x: NDArray, y: NDArray, train_ratio=0.7, val_ratio=0.15):
     total_samples = len(x)
@@ -171,6 +191,7 @@ def split_data(x: NDArray, y: NDArray, train_ratio=0.7, val_ratio=0.15):
 
     test_X: NDArray = x[train_size + val_size :]
     test_y: NDArray = y[train_size + val_size :]
+    print(f"📊 Data split: {len(train_X)} train, {len(val_X)} val, {len(test_X)} test")
 
     return (train_X, train_y), (val_X, val_y), (test_X, test_y)
 

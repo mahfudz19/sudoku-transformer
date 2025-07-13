@@ -3,98 +3,78 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from model import TransformerStockPredictor
+from experiment_utils import get_experiment_name, get_best_model_path, get_val_loss_log_path, save_best_model, load_best_model
 
-def train_model(model: TransformerStockPredictor, train_loader, val_loader, num_epochs=50, lr=0.001):
+def train_model(model: TransformerStockPredictor, train_loader, val_loader, num_epochs=50, lr=0.001, experiment_name=None):
     # Setup training components
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)  # Add weight decay
+    optimizer = optim.Adam(model.parameters(), lr=lr, weight_decay=1e-5)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
-    
-    # History untuk tracking loss
     history = {'train_loss': [], 'val_loss': []}
-    
+
+    # Buat nama eksperimen unik jika belum ada
+    if experiment_name is None:
+        experiment_name = get_experiment_name()
+    best_model_path = get_best_model_path(experiment_name)
+    val_loss_log_path = get_val_loss_log_path(experiment_name)
+
     print(f"🚀 MEMULAI TRAINING untuk {num_epochs} epochs...")
     print(f"📋 Learning Rate: {lr}, Weight Decay: 1e-5")
+    print(f"📋 Experiment: {experiment_name}")
     print("=" * 60)
-    
+
     best_val_loss = float('inf')
     patience_counter = 0
     early_stopping_patience = 15
-    
+
     for epoch in range(num_epochs):
         # ===== TRAINING PHASE =====
         model.train()
         total_train_loss = 0
         num_train_batches = 0
-        
         for batch_x, batch_y in train_loader:
-            # Convert ke tensor jika belum
             batch_x = batch_x.float()
             batch_y = batch_y.float()
-            
-            # Forward pass
             predictions = model(batch_x)
             loss = criterion(predictions, batch_y)
-            
-            # Backward pass
             optimizer.zero_grad()
             loss.backward()
-            
-            # Gradient clipping untuk stabilitas training
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
             optimizer.step()
-            
             total_train_loss += loss.item()
             num_train_batches += 1
-        
-        # Hitung rata-rata training loss
         avg_train_loss = total_train_loss / num_train_batches if num_train_batches > 0 else 0
-        
+
         # ===== VALIDATION PHASE =====
         model.eval()
         total_val_loss = 0
         num_val_batches = 0
-        
         with torch.no_grad():
             for batch_x, batch_y in val_loader:
                 batch_x = batch_x.float()
                 batch_y = batch_y.float()
-                
                 predictions = model(batch_x)
                 loss = criterion(predictions, batch_y)
-                
                 total_val_loss += loss.item()
                 num_val_batches += 1
-        
-        # Hitung rata-rata validation loss
         avg_val_loss = total_val_loss / num_val_batches if num_val_batches > 0 else 0
-        
-        # Update learning rate scheduler
-        # Tambahkan manual logging untuk LR changes
-        old_lr = optimizer.param_groups[0]['lr']
-        scheduler.step(avg_val_loss)
-        new_lr = optimizer.param_groups[0]['lr']
 
-        if old_lr != new_lr:
-            print(f"📉 Learning rate reduced: {old_lr:.1e} → {new_lr:.1e}")
-        
-        # Simpan ke history
+        # Update learning rate scheduler
+        scheduler.step(avg_val_loss)
+
         history['train_loss'].append(avg_train_loss)
         history['val_loss'].append(avg_val_loss)
-        
-        # Early stopping logic
+
+        # Early stopping logic & save best model
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             patience_counter = 0
-            # Save best model
-            torch.save(model.state_dict(), 'file/best_model.pth')
+            save_best_model(model, best_model_path, best_val_loss, epoch+1, val_loss_log_path)
             improvement_indicator = "📈"
         else:
             patience_counter += 1
             improvement_indicator = "📉" if patience_counter > 5 else "➖"
-        
-        # Print progress dengan informasi lebih detail
+
         current_lr = optimizer.param_groups[0]['lr']
         if epoch == 0 or (epoch + 1) % 5 == 0 or epoch == num_epochs - 1:
             print(f"Epoch {epoch+1:3d}/{num_epochs} {improvement_indicator} | "
@@ -102,27 +82,23 @@ def train_model(model: TransformerStockPredictor, train_loader, val_loader, num_
                   f"Val: {avg_val_loss:.6f} | "
                   f"LR: {current_lr:.1e} | "
                   f"Patience: {patience_counter}/{early_stopping_patience}")
-        
-        # Early stopping check
+
         if patience_counter >= early_stopping_patience:
             print(f"\n🛑 Early stopping triggered at epoch {epoch+1}")
             print(f"   Best validation loss: {best_val_loss:.6f}")
             break
-    
+
     print("=" * 60)
     print(f"✅ TRAINING SELESAI!")
     print(f"📊 Final Metrics:")
     print(f"   └─ Best Val Loss: {best_val_loss:.6f}")
     print(f"   └─ Total Epochs: {len(history['train_loss'])}")
     print(f"   └─ Final LR: {optimizer.param_groups[0]['lr']:.1e}")
-    
+
     # Load best model jika ada
-    try:
-        model.load_state_dict(torch.load('best_model.pth'))
-        print(f"🔄 Loaded best model from checkpoint")
-    except FileNotFoundError:
+    loaded = load_best_model(model, best_model_path)
+    if not loaded:
         print(f"⚠️  Best model checkpoint not found, using current model")
-    
     return model, history
 
 

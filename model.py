@@ -17,12 +17,14 @@ class PositionalEncoding(nn.Module):
         
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
+        pe = pe.unsqueeze(0)
         
         self.register_buffer('pe', pe)
         
     def forward(self, x):
-        return x + self.pe[:x.size(0), :]
+        seq_len = x.size(1)
+        x = x + self.pe[:, :seq_len, :]
+        return x
 
 
 class TransformerStockPredictor(nn.Module):
@@ -62,11 +64,10 @@ class TransformerStockPredictor(nn.Module):
         return mask
         
     def forward(self, x):
-        # x shape: (batch_size, sequence_length)
-        batch_size, seq_len = x.shape
+        # x shape: (batch_size, seq_len, feature)
+        batch_size, seq_len, feature = x.shape
         
         # Add feature dimension and project to d_model
-        x = x.unsqueeze(-1)  # (batch_size, seq_len, 1)
         x = self.input_projection(x)  # (batch_size, seq_len, d_model)
         
         # Scale by sqrt(d_model) as in original transformer
@@ -86,15 +87,14 @@ class TransformerStockPredictor(nn.Module):
         
         # Global average pooling atau ambil last token
         # Disini kita ambil last token untuk prediction
-        last_output = transformer_out[:, -1, :]  # (batch_size, d_model)
         
         # Final prediction layers
-        x = self.dropout(last_output)
+        x = self.dropout(transformer_out)
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
         output = self.fc2(x)
         
-        return output.squeeze(-1)
+        return output
 
 
 class StockDataset(Dataset):

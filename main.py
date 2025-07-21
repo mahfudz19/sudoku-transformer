@@ -7,6 +7,7 @@ from model import TransformerStockPredictor, create_dataloaders
 from get_data_utils import create_output_directories, fetch_stock_data, normalize_data, create_sequences, split_data
 from learning import train_model, evaluate_model, predict_next_price
 from visualization import plot_training_loss, plot_prediction_vs_actual
+from experiment_utils import find_best_model_in_folder
 
 # Test fungsi yang sudah dibuat
 if __name__ == "__main__":
@@ -34,14 +35,18 @@ if __name__ == "__main__":
     dataloader_components = create_dataloaders(train_data, val_data, test_data, batch_size=16)
 
     # Step 5b: Create model
-    model = TransformerStockPredictor(d_model=64, nhead=8, num_layers=2)
+    model = TransformerStockPredictor(d_model=128, nhead=16, num_layers=8)
     print(f"🤖 Model created: {model.__class__.__name__}")
 
     # Otomatis load best model jika file ada
-    best_model_path = "file/best_model.pth"
-    if os.path.exists(best_model_path):
+    is_best_model_loaded = False
+    best_model_path, best_experiment_name, best_loss = find_best_model_in_folder("file")
+    if best_model_path and os.path.exists(best_model_path):
         model.load_state_dict(torch.load(best_model_path))
-        print(f"✅ Best model loaded from {best_model_path}")
+        print(f"✅ Best model loaded: {best_model_path} (val_loss={best_loss})")
+        is_best_model_loaded = True
+    else:
+        print("❌ Tidak ditemukan best model di folder 'file/'")
 
     # Step 6: Training
     trained_model, history = train_model(
@@ -49,7 +54,7 @@ if __name__ == "__main__":
         train_loader=dataloader_components['train_loader'],
         val_loader=dataloader_components['val_loader'],
         num_epochs=250,
-        lr=0.001
+        lr=0.0001 if is_best_model_loaded else 0.001,
     )
 
     # Step 7: Evaluation
@@ -79,4 +84,8 @@ if __name__ == "__main__":
     print(f"\n🎉 SEMUA TAHAP SELESAI!")
     print(f"📈 Prediksi harga AAPL berikutnya: ${predicted_price:.2f}")
     print(f"📊 Charts disimpan di folder 'plt/'")
+
+    # 3. Prediksi (denormalisasi hasil prediksi dengan scaler yang sama)
+    # predictions = model(input_tensor)
+    # predictions_denorm = scaler.inverse_transform(predictions.detach().cpu().numpy())
 

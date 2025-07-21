@@ -130,7 +130,7 @@ def normalize_data(df: pd.DataFrame, target_column="close"):
     return scaler, normalized_data
 
 
-def create_sequences_old(normalized_data: NDArray[np.float64], window_size=5): # Standard sliding
+def create_sequences(normalized_data: NDArray[np.float64], window_size=5): # Standard sliding
     # Validasi input
     if len(normalized_data) <= window_size:
         print(f"❌ Error: Data terlalu sedikit. Need > {window_size}, got {len(normalized_data)}")
@@ -144,7 +144,8 @@ def create_sequences_old(normalized_data: NDArray[np.float64], window_size=5): #
         y.append(seq[1:])   # target: [x2, x3, x4, x5]
     return np.array(x), np.array(y)
 
-def create_sequences(normalized_data: NDArray[np.float64], window_size=5): # Progressive sequence
+
+def create_sequences_old(normalized_data: NDArray[np.float64], window_size=5): # Progressive sequence
     # Validasi input
     if len(normalized_data) <= window_size:
         print(f"❌ Error: Data terlalu sedikit. Need > {window_size}, got {len(normalized_data)}")
@@ -174,6 +175,7 @@ def create_sequences(normalized_data: NDArray[np.float64], window_size=5): # Pro
             y.append(target_seq)
     
     return x, y  # Return as lists karena y memiliki panjang yang berbeda-beda
+
 
 def split_data(x: NDArray, y: NDArray, train_ratio=0.7, val_ratio=0.15):
     total_samples = len(x)

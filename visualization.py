@@ -3,6 +3,7 @@ import numpy as np
 import seaborn as sns
 from typing import Dict, Any
 import os
+import datetime
 
 def plot_training_history(history: Dict[str, list], save_path: str = "plt/training_history.png"):
     """
@@ -264,10 +265,23 @@ def generate_model_report(history: Dict[str, list], results: Dict[str, Any],
     
     print("\n" + "="*80)
 
-def plot_training_loss(history, save_path="plt/training_loss.png"):
+def get_unique_filename(prefix, ext="png", folder="plt"):
+    """
+    Generate unique filename with timestamp.
+    """
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return os.path.join(folder, f"{prefix}_{timestamp}.{ext}")
+
+def plot_training_loss(history, save_path=None, experiment_name=None):
     """
     Chart 1: Perbandingan Training Loss vs Validation Loss
     """
+    if save_path is None:
+        prefix = f"training_loss"
+        if experiment_name:
+            prefix += f"_{experiment_name}"
+        save_path = get_unique_filename(prefix)
+    
     plt.figure(figsize=(10, 6))
     
     epochs = range(1, len(history['train_loss']) + 1)
@@ -295,10 +309,16 @@ def plot_training_loss(history, save_path="plt/training_loss.png"):
     plt.show()
     print(f"📊 Training loss chart saved to: {save_path}")
 
-def plot_prediction_vs_actual(results, save_path="plt/prediction_accuracy.png"):
+def plot_prediction_vs_actual(results, save_path=None, experiment_name=None):
     """
     Chart 2: Akurasi Prediksi vs Data Actual
     """
+    if save_path is None:
+        prefix = f"prediction_accuracy"
+        if experiment_name:
+            prefix += f"_{experiment_name}"
+        save_path = get_unique_filename(prefix)
+    
     predictions = results['predictions']
     actuals = results['actuals']
     

@@ -4,7 +4,15 @@ import torch
 
 # Import dari file terpisah
 from model import TransformerStockPredictor, create_dataloaders
-from get_data_utils import create_output_directories, fetch_stock_data, normalize_data, create_sequences, split_data
+from get_data_utils import (
+    create_output_directories,
+    fetch_stock_data,
+    normalize_data,
+    create_standard_sequences,
+    create_progressive_sequences,
+    split_data,
+    pad_sequences,
+)
 from learning import train_model, evaluate_model, predict_next_price
 from visualization import plot_training_loss, plot_prediction_vs_actual
 from experiment_utils import find_best_model_in_folder
@@ -26,23 +34,27 @@ if __name__ == "__main__":
     scaler, normalized_data = normalize_data(df, "close")
 
     # Step 3: Create sequences
-    x, y = create_sequences(normalized_data, window_size=5)
+    x, y = create_progressive_sequences(normalized_data, start_window=5, max_window=30)
+    x = pad_sequences(x)  # Pad input sequences
+    y = pad_sequences(y)  # Pad target sequences
 
     # Step 4: Split data
     train_data, val_data, test_data = split_data(x, y)
 
     # Step 5a: Setup data loaders
-    dataloader_components = create_dataloaders(train_data, val_data, test_data, batch_size=16)
+    dataloader_components = create_dataloaders(
+        train_data, val_data, test_data, batch_size=32
+    )
 
     # Step 5b: Create model
-    model = TransformerStockPredictor(d_model=128, nhead=16, num_layers=8)
+    model = TransformerStockPredictor(d_model=64, nhead=8, num_layers=2)
     print(f"🤖 Model created: {model.__class__.__name__}")
 
     # Otomatis load best model jika file ada
     is_best_model_loaded = False
     best_model_path, best_experiment_name, best_loss = find_best_model_in_folder("file")
     if best_model_path and os.path.exists(best_model_path):
-        model.load_state_dict(torch.load(best_model_path))
+        model.load_state_dict(torch.load(best_model_path), strict=False)
         print(f"✅ Best model loaded: {best_model_path} (val_loss={best_loss})")
         is_best_model_loaded = True
     else:
@@ -51,25 +63,23 @@ if __name__ == "__main__":
     # Step 6: Training
     trained_model, history = train_model(
         model=model,
-        train_loader=dataloader_components['train_loader'],
-        val_loader=dataloader_components['val_loader'],
-        num_epochs=250,
+        train_loader=dataloader_components["train_loader"],
+        val_loader=dataloader_components["val_loader"],
+        num_epochs=10,
         lr=0.0001 if is_best_model_loaded else 0.001,
     )
 
     # Step 7: Evaluation
     results = evaluate_model(
         model=trained_model,
-        test_loader=dataloader_components['test_loader'],
-        scaler=scaler
+        test_loader=dataloader_components["test_loader"],
+        scaler=scaler,
     )
 
     # Step 8: Prediksi harga berikutnya
     last_sequence = x[-1]  # Ambil sequence terakhir
     predicted_price = predict_next_price(
-        model=trained_model,
-        last_sequence=last_sequence,
-        scaler=scaler
+        model=trained_model, last_sequence=last_sequence, scaler=scaler
     )
 
     # Step 9: VISUALISASI 📊 (Hanya 2 chart yang dibutuhkan)
@@ -88,4 +98,3 @@ if __name__ == "__main__":
     # 3. Prediksi (denormalisasi hasil prediksi dengan scaler yang sama)
     # predictions = model(input_tensor)
     # predictions_denorm = scaler.inverse_transform(predictions.detach().cpu().numpy())
-

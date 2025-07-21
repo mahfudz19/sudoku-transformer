@@ -130,7 +130,7 @@ def normalize_data(df: pd.DataFrame, target_column="close"):
     return scaler, normalized_data
 
 
-def create_sequences(normalized_data: NDArray[np.float64], window_size=5): # Standard sliding
+def create_standard_sequences(normalized_data: NDArray[np.float64], window_size=5): # Standard sliding
     # Validasi input
     if len(normalized_data) <= window_size:
         print(f"❌ Error: Data terlalu sedikit. Need > {window_size}, got {len(normalized_data)}")
@@ -145,36 +145,16 @@ def create_sequences(normalized_data: NDArray[np.float64], window_size=5): # Sta
     return np.array(x), np.array(y)
 
 
-def create_sequences_old(normalized_data: NDArray[np.float64], window_size=5): # Progressive sequence
-    # Validasi input
-    if len(normalized_data) <= window_size:
-        print(f"❌ Error: Data terlalu sedikit. Need > {window_size}, got {len(normalized_data)}")
-        return None, None
-
-    x = []
-    y = []
-    
-    for i in range(len(normalized_data) - window_size):
-        # Input selalu sama: window_size-1 elemen
-        input_seq = normalized_data[i:i+window_size-1]  # [x1, x2, x3, x4]
-        x.append(input_seq)
-        
-        # Target dengan panjang yang bertambah
-        # Sequence ke-i: mulai dari index 1, panjang = window_size-1 + i
-        target_length = (window_size - 1) + i
-        target_start = 1  # Selalu mulai dari index 1
-        target_end = target_start + target_length
-        
-        # Pastikan tidak melebihi batas data
-        if target_end <= len(normalized_data):
-            target_seq = normalized_data[target_start:target_end]
-            y.append(target_seq)
-        else:
-            # Jika melebihi batas, ambil sampai akhir data
-            target_seq = normalized_data[target_start:]
-            y.append(target_seq)
-    
-    return x, y  # Return as lists karena y memiliki panjang yang berbeda-beda
+def create_progressive_sequences(data, start_window=5, max_window=100):
+    x_all = []
+    y_all = []
+    for window_size in range(start_window, max_window + 1):
+        for i in range(len(data) - window_size):
+            seq = data[i:i+window_size]
+            x_all.append(seq[:-1])
+            y_all.append(seq[1:])
+    # Jangan langsung np.array, return list!
+    return x_all, y_all
 
 
 def split_data(x: NDArray, y: NDArray, train_ratio=0.7, val_ratio=0.15):
@@ -197,3 +177,13 @@ def split_data(x: NDArray, y: NDArray, train_ratio=0.7, val_ratio=0.15):
 
     return (train_X, train_y), (val_X, val_y), (test_X, test_y)
 
+def pad_sequences(sequences, value=0.0):
+    """
+    Pad list of 2D arrays to shape (len(sequences), maxlen, feature)
+    """
+    maxlen = max(seq.shape[0] for seq in sequences)
+    feature_dim = sequences[0].shape[1] if len(sequences) > 0 else 1
+    padded = np.full((len(sequences), maxlen, feature_dim), value, dtype=np.float32)
+    for i, seq in enumerate(sequences):
+        padded[i, :seq.shape[0], :] = seq
+    return padded

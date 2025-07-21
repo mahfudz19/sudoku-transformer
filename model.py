@@ -28,7 +28,7 @@ class PositionalEncoding(nn.Module):
 
 
 class TransformerStockPredictor(nn.Module):
-    def __init__(self, d_model=64, nhead=8, num_layers=2, seq_len=5, dropout=0.1):
+    def __init__(self, d_model=64, nhead=8, num_layers=2, seq_len=100, dropout=0.1):
         super(TransformerStockPredictor, self).__init__()
         
         self.d_model = d_model
@@ -50,7 +50,7 @@ class TransformerStockPredictor(nn.Module):
             batch_first=True
         )
         self.transformer = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
-        self.register_buffer("causal_mask", self._generate_causal_mask(seq_len))
+        self.register_buffer("default_causal_mask", self._generate_causal_mask(self.seq_len))
 
         # Output layers
         self.fc1 = nn.Linear(d_model, d_model // 2)
@@ -80,9 +80,9 @@ class TransformerStockPredictor(nn.Module):
         
         # Transformer encoding
         transformer_out = self.transformer(
-            tgt=x, 
-            memory=x, 
-            tgt_mask=self.causal_mask[:seq_len, :seq_len]
+            tgt=x,
+            memory=x,
+            tgt_mask=self._generate_causal_mask(seq_len).to(x.device)
         )
         
         # Global average pooling atau ambil last token
@@ -93,7 +93,7 @@ class TransformerStockPredictor(nn.Module):
         x = F.relu(self.fc1(x))
         x = self.dropout(x)
         output = self.fc2(x)
-        
+
         return output
 
 
